@@ -1,78 +1,42 @@
 #include <iostream>
 #include <vector>
-#include <conio.h>
 #include <string>
-#include <windows.h>
 #include <fstream>
+#include <termios.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
 
-// Nastaví pozici kurzoru v konzoli
-void setCursorPosition(short x, short y) {
-    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-    COORD pos = { x, y };
-    SetConsoleCursorPosition(hConsole, pos);
+// Nastaví pozici kurzoru v konzoli (0-based coords)
+void setCursorPosition(int x, int y) {
+    // ANSI escape: row;col are 1-based
+    std::cout << "\x1b[" << (y + 1) << ";" << (x + 1) << "H";
 }
 
-// Vymaže konzoli efektivně bez blikání
+// Vymaže konzoli
 void clearScreen() {
-    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
-    GetConsoleScreenBufferInfo(hConsole, &csbi);
-
-    DWORD charsWritten;
-    COORD homeCoord = {0, 0};
-    FillConsoleOutputCharacter(hConsole, ' ', csbi.dwSize.X * csbi.dwSize.Y, homeCoord, &charsWritten);
-    FillConsoleOutputAttribute(hConsole, csbi.wAttributes, csbi.dwSize.X * csbi.dwSize.Y, homeCoord, &charsWritten);
-    SetConsoleCursorPosition(hConsole, homeCoord);
+    std::cout << "\x1b[2J\x1b[H";
 }
 
-// Zobrazí informační popup
+// Simple console messages instead of GUI popups
 void showMessage(const std::string& text, const std::string& title = "Info") {
-    MessageBoxA(NULL, text.c_str(), title.c_str(), MB_OK | MB_ICONINFORMATION);
+    std::cout << "[" << title << "] " << text << "\n";
 }
 
-// Zobrazí chybový popup
 void showError(const std::string& text, const std::string& title = "Error") {
-    MessageBoxA(NULL, text.c_str(), title.c_str(), MB_OK | MB_ICONERROR);
+    std::cerr << "[" << title << "] " << text << "\n";
 }
 
-// Otevře dialog pro uložení souboru a vrátí cestu, nebo "" pokud uživatel zruší
-std::string getSaveFileName() {
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
-    ofn.lpstrFilter = "Text files (*.txt)\0*.txt\0All files (*.*)\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
-    ofn.lpstrDefExt = "txt";
-
-    if (GetSaveFileNameA(&ofn)) {
-        return std::string(filename);
-    }
-    return "";
-}
-
-// Otevře dialog pro načtení souboru a vrátí cestu, nebo "" pokud uživatel zruší
-std::string getOpenFileName() {
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
-    ofn.lpstrFilter = "Text files (*.txt)\0*.txt\0All files (*.*)\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-
-    if (GetOpenFileNameA(&ofn)) {
-        return std::string(filename);
-    }
-    return "";
+// Prompt for filename on console (no GUI)
+std::string promptFileName(const std::string& prompt) {
+    std::string filename;
+    std::cout << prompt << " (empty = cancel): ";
+    std::getline(std::cin, filename);
+    return filename;
 }
 
 // Uloží obsah lines do souboru
 void saveToFile(const std::vector<std::string>& lines) {
-    std::string filename = getSaveFileName();
+    std::string filename = promptFileName("Save as");
     if (filename.empty()) {
         showMessage("Saving stopped.");
         return;
@@ -91,7 +55,7 @@ void saveToFile(const std::vector<std::string>& lines) {
 
 // Načte obsah souboru do lines
 bool loadFromFile(std::vector<std::string>& lines, int& curLine, int& curPos) {
-    std::string filename = getOpenFileName();
+    std::string filename = promptFileName("Open file");
     if (filename.empty()) {
         showMessage("Loading stopped.");
         return false;
@@ -132,9 +96,10 @@ void renderText(const std::vector<std::string>& lines, int curLine, int curPos) 
 
     // Nastav kurzor na správnou pozici (za číslo řádku + ". " + posun v textu)
     int cursorX = lineNumberWidth + 2 + curPos;
-    int cursorY = 2 + (SHORT)curLine;
+    int cursorY = 2 + curLine;
 
-    setCursorPosition((SHORT)cursorX, (SHORT)cursorY);
+    setCursorPosition(cursorX, cursorY);
+    std::cout.flush();
 }
 
 // Editor s klávesnicí a ovládáním
@@ -145,8 +110,44 @@ void runEditor() {
 
     renderText(lines, curLine, curPos);
 
+    // Helper to read keys including arrow sequences
+    auto readKey = []() -> int {
+        struct termios oldt, newt;
+        tcgetattr(STDIN_FILENO, &oldt);
+        newt = oldt;
+        newt.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+        unsigned char c = 0;
+        if (read(STDIN_FILENO, &c, 1) <= 0) {
+            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+            return 0;
+        }
+
+        if (c == 27) { // ESC or escape sequence
+            // check if more bytes are available
+            int bytes = 0;
+            ioctl(STDIN_FILENO, FIONREAD, &bytes);
+            if (bytes >= 2) {
+                unsigned char seq[2];
+                read(STDIN_FILENO, seq, 2);
+                if (seq[0] == '[') {
+                    if (seq[1] == 'A') { tcsetattr(STDIN_FILENO, TCSANOW, &oldt); return 1001; }
+                    if (seq[1] == 'B') { tcsetattr(STDIN_FILENO, TCSANOW, &oldt); return 1002; }
+                    if (seq[1] == 'C') { tcsetattr(STDIN_FILENO, TCSANOW, &oldt); return 1003; }
+                    if (seq[1] == 'D') { tcsetattr(STDIN_FILENO, TCSANOW, &oldt); return 1004; }
+                }
+            }
+            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+            return 27; // plain ESC
+        }
+
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        return c;
+    };
+
     while (true) {
-        SHORT key = _getch();
+        int key = readKey();
 
         if (key == 27) { // ESC - konec
             break;
@@ -164,7 +165,7 @@ void runEditor() {
                 renderText(lines, curLine, curPos);
             }
         }
-        else if (key == 13) { // Enter
+        else if (key == '\n' || key == '\r') { // Enter
             std::string currentLine = lines[curLine];
             std::string newLine = currentLine.substr(curPos);
             lines[curLine] = currentLine.substr(0, curPos);
@@ -173,7 +174,7 @@ void runEditor() {
             curPos = 0;
             renderText(lines, curLine, curPos);
         }
-        else if (key == 8) { // Backspace
+        else if (key == 8 || key == 127) { // Backspace (handle DEL too)
             if (curPos > 0) {
                 lines[curLine].erase(curPos - 1, 1);
                 curPos--;
@@ -186,21 +187,20 @@ void runEditor() {
             }
             renderText(lines, curLine, curPos);
         }
-        else if (key == 224) { // Šipky
-            SHORT arrow = _getch();
-            if (arrow == 72) { // Up
+        else if (key >= 1001 && key <= 1004) { // arrows
+            if (key == 1001) { // Up
                 if (curLine > 0) {
                     curLine--;
                     if (curPos > (int)lines[curLine].size()) curPos = (int)lines[curLine].size();
                 }
             }
-            else if (arrow == 80) { // Down
+            else if (key == 1002) { // Down
                 if (curLine < (int)lines.size() - 1) {
                     curLine++;
                     if (curPos > (int)lines[curLine].size()) curPos = (int)lines[curLine].size();
                 }
             }
-            else if (arrow == 75) { // Left
+            else if (key == 1004) { // Left
                 if (curPos > 0) {
                     curPos--;
                 }
@@ -209,7 +209,7 @@ void runEditor() {
                     curPos = (int)lines[curLine].size();
                 }
             }
-            else if (arrow == 77) { // Right
+            else if (key == 1003) { // Right
                 if (curPos < (int)lines[curLine].size()) {
                     curPos++;
                 }

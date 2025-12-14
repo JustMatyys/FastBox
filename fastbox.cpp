@@ -1,13 +1,37 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <windows.h>
 #include <filesystem>
-#include <conio.h> // _getch
+#include <termios.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <cstdlib>
 
 namespace fs = std::filesystem;
 
 std::string currentDir = fs::current_path().string();
+
+void clearScreen() {
+    std::cout << "\x1b[2J\x1b[H";
+}
+
+void setTerminalTitle(const std::string &title) {
+    std::cout << "\x1b]0;" << title << "\x07";
+}
+
+// simple getch() for POSIX
+int getch_posix() {
+    struct termios oldt, newt;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    unsigned char c;
+    int n = (int)read(STDIN_FILENO, &c, 1);
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    if (n <= 0) return 0;
+    return c;
+}
 
 // Autocomplete helper
 std::vector<std::string> getMatchingDirectories(const std::string& prefix) {
@@ -27,19 +51,22 @@ void processCommand() {
     std::string buffer;
 
     while (true) {
-        std::cout << currentDir << ">> ";
+        std::string prompt = currentDir + ">> ";
+        std::cout << prompt;
+        std::cout.flush();
         buffer.clear();
 
         while (true) {
-            char ch = _getch();
+            int ich = getch_posix();
+            char ch = (char)ich;
 
-            if (ch == '\r') { // ENTER
+            if (ch == '\r' || ch == '\n') { // ENTER
                 std::cout << "\n";
                 break;
-            } else if (ch == '\b') { // BACKSPACE
+            } else if (ich == 127 || ch == '\b') { // BACKSPACE (DEL or BS)
                 if (!buffer.empty()) {
                     buffer.pop_back();
-                    std::cout << "\b \b";
+                    std::cout << "\b \b" << std::flush;
                 }
             } else if (ch == '\t') { // TAB (autocomplete)
                 if (buffer.rfind("cd ", 0) == 0) {
@@ -48,12 +75,12 @@ void processCommand() {
                     if (!matches.empty()) {
                         buffer = "cd " + matches[0];
                         // Přepiš aktuální řádek
-                        std::cout << "\r" << currentDir << ">> " << buffer << "    ";
+                        std::cout << "\r\x1b[K" << prompt << buffer << std::flush;
                     }
                 }
             } else {
                 buffer += ch;
-                std::cout << ch;
+                std::cout << ch << std::flush;
             }
         }
 
@@ -75,23 +102,23 @@ void processCommand() {
             break;
         }
         else if (command == "cls" || command == "clear") {
-            system("cls");
+            clearScreen();
         }
         else if (command == "dir" || command == "ls") {
-            std::string cmd = "dir \"" + currentDir + "\"";
+            std::string cmd = "ls -la \"" + currentDir + "\"";
             system(cmd.c_str());
         }
         else if (command == "nano" || command == "mkfile") {
-            int result = system("bin\\nano.exe");
-            system("cls"); // Clear screen after nano
-            SetConsoleTitleA("FastBox");
+            int result = system("./bin/nano");
+            clearScreen(); // Clear screen after nano
+            setTerminalTitle("FastBox");
             if (result == -1) std::cout << "Failed to start nano.\n";
         }
         else if (command == "ssh") {
-            int result = system("bin\\ssh.exe");
+            int result = system("./bin/ssh");
             if (result == -1) std::cout << "Failed to start ssh client.\n";
-            system("cls"); // Clear screen after ssh client closes
-            SetConsoleTitleA("FastBox");
+            clearScreen(); // Clear screen after ssh client closes
+            setTerminalTitle("FastBox");
         }
         else if (command.rfind("cd ", 0) == 0) {
             std::string path = command.substr(3);
@@ -99,7 +126,7 @@ void processCommand() {
             newPath /= path;
             if (fs::exists(newPath) && fs::is_directory(newPath)) {
                 currentDir = fs::canonical(newPath).string();
-                SetCurrentDirectoryA(currentDir.c_str());
+                chdir(currentDir.c_str());
             } else {
                 std::cout << "Directory not found: " << path << "\n";
             }
@@ -120,8 +147,8 @@ void processCommand() {
             if (first != std::string::npos && last != std::string::npos && first != last) {
                 std::string cmd = command.substr(first + 1, last - first - 1);
                 int result = system(cmd.c_str());
-                system("cls"); // Clear after external command
-                SetConsoleTitleA("FastBox");                
+                clearScreen(); // Clear after external command
+                setTerminalTitle("FastBox");                
                 if (result == -1) std::cout << "Failed to run.\n";
             } else {
                 std::cout << "Error: Missing quotes.\n";
@@ -134,13 +161,13 @@ void processCommand() {
 }
 
 int main() {
-    system("cls");
-    SetConsoleTitleA("FastBox");
+    clearScreen();
+    setTerminalTitle("FastBox");
     std::cout << "Welcome to FastBox - Version 1.0\n";
     std::cout << "Make your own FastBox! Download source code at: https://www.github.com/MatyysLinux/FastBox\n";
     std::cout << "Owned by MatyysLinux!\n\n";
-    SetConsoleTitleA("FastBox");
+    setTerminalTitle("FastBox");
     processCommand();
-    SetConsoleTitleA("FastBox");
+    setTerminalTitle("FastBox");
     return 0;
 }
